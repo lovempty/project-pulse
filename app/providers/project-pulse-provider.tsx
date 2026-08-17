@@ -4,7 +4,6 @@ import { createContext, useCallback, useContext, useEffect, useMemo, useState, t
 import {
   api,
   authenticate,
-  type AiResult,
   type AnalyticsData,
   type BoardData,
   type DashboardData,
@@ -34,7 +33,6 @@ type ProjectPulseContextValue = {
   workload: Workload[];
   analytics: AnalyticsData | null;
   board: BoardData | null;
-  aiResult: AiResult | null;
   loading: boolean;
   error: string;
   taskModalOpen: boolean;
@@ -45,7 +43,6 @@ type ProjectPulseContextValue = {
   reload: () => Promise<void>;
   createTask: (task: NewTask) => Promise<void>;
   moveTask: (task: Task, targetStatus: string) => Promise<void>;
-  askAssistant: (intent: string) => Promise<void>;
 };
 
 const ProjectPulseContext = createContext<ProjectPulseContextValue | null>(null);
@@ -60,7 +57,6 @@ export function ProjectPulseProvider({ children }: { children: ReactNode }) {
   const [workload, setWorkload] = useState<Workload[]>([]);
   const [analytics, setAnalytics] = useState<AnalyticsData | null>(null);
   const [board, setBoard] = useState<BoardData | null>(null);
-  const [aiResult, setAiResult] = useState<AiResult | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState("");
   const [taskModalOpen, setTaskModalOpen] = useState(false);
@@ -145,22 +141,13 @@ export function ProjectPulseProvider({ children }: { children: ReactNode }) {
     }
   }, [board, notify, workspace]);
 
-  const askAssistant = useCallback(async (intent: string) => {
-    if (!workspace) return;
-    try {
-      setAiResult(await api.askAi(workspace.id, intent));
-    } catch (cause) {
-      notify(cause instanceof Error ? cause.message : "AI request failed");
-    }
-  }, [notify, workspace]);
-
   const value = useMemo<ProjectPulseContextValue>(() => ({
     user, workspace, dashboard, projects, tasks, members, workload, analytics,
-    board, aiResult, loading, error, taskModalOpen, toast,
+    board, loading, error, taskModalOpen, toast,
     openTaskModal: () => setTaskModalOpen(true),
     closeTaskModal: () => setTaskModalOpen(false),
-    notify, reload, createTask, moveTask, askAssistant,
-  }), [user, workspace, dashboard, projects, tasks, members, workload, analytics, board, aiResult, loading, error, taskModalOpen, toast, notify, reload, createTask, moveTask, askAssistant]);
+    notify, reload, createTask, moveTask,
+  }), [user, workspace, dashboard, projects, tasks, members, workload, analytics, board, loading, error, taskModalOpen, toast, notify, reload, createTask, moveTask]);
 
   return <ProjectPulseContext.Provider value={value}>{children}</ProjectPulseContext.Provider>;
 }

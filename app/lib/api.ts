@@ -10,7 +10,13 @@ export type Activity = { id: string; action: string; createdAt: string; actor: U
 export type AnalyticsData = { tasksByStatus: { name: string; count: number }[]; tasksByPriority: { name: string; count: number }[]; overdueCount: number; completionTrend: { date: string; count: number }[]; projectProgress: { projectId: string; name: string; total: number; progress: number }[]; workloadByMember: { assigneeId: string; name: string; openTasks: number }[] };
 export type DashboardData = { metrics: { activeProjectCount: number; completedTaskCount: number; overdueTaskCount: number; teamWorkloadPercent: number }; projectCompletionTrend: { projectId: string; name: string; progress: number }[]; activeProjects: Project[]; teamWorkload: Workload[]; recentActivity: Activity[] };
 export type BoardData = { project: Project; columns: { status: string; tasks: Task[] }[] };
-export type AiResult = { summary: string; highlights: string[]; risks: string[]; recommendedActions: string[]; generatedAt: string };
+export type AiIntent = "SUMMARIZE_PROGRESS" | "IDENTIFY_RISKS" | "RECOMMEND_PRIORITIES" | "GENERATE_WEEKLY_UPDATE";
+export type AiHistoryMessage = { role: "USER" | "ASSISTANT"; content: string };
+export type AiRequest = { intent?: AiIntent; question?: string | null; projectId?: string | null; history?: AiHistoryMessage[] };
+export type AiEvidence = { type: "TASK" | "PROJECT" | "MEMBER" | "METRIC"; id: string | null; label: string; detail: string };
+export type AiMetadata = { provider: "ANTHROPIC"; model: string; mode: "LIVE" | "MOCK"; latencyMs: number; inputTokens: number; outputTokens: number; cacheReadTokens: number };
+export type AiResult = { summary: string; highlights: string[]; risks: string[]; recommendedActions: string[]; evidence: AiEvidence[]; followUpQuestions: string[]; generatedAt: string; metadata: AiMetadata };
+export type AiCapabilities = { provider: "ANTHROPIC"; model: string; mode: "LIVE" | "MOCK"; supportsCustomQuestions: boolean; supportsProjectFiltering: boolean; supportsFollowUps: boolean; supportsStreaming?: boolean };
 
 type Envelope<T> = { data: T };
 type Page<T> = Envelope<T[]> & { pagination: { page: number; limit: number; total: number; totalPages: number } };
@@ -18,7 +24,7 @@ type Page<T> = Envelope<T[]> & { pagination: { page: number; limit: number; tota
 let accessToken = "";
 
 export class ApiError extends Error {
-  constructor(message: string, public code = "API_ERROR", public status = 0) { super(message); }
+  constructor(message: string, public code = "API_ERROR", public status = 0, public retryAfter?: number) { super(message); }
 }
 
 async function request<T>(path: string, init: RequestInit = {}, retry = true): Promise<T> {
@@ -33,7 +39,8 @@ async function request<T>(path: string, init: RequestInit = {}, retry = true): P
   }
   if (!response.ok) {
     const body = await response.json().catch(() => null);
-    throw new ApiError(body?.error?.message ?? `Request failed (${response.status})`, body?.error?.code, response.status);
+    const retryAfter = Number(response.headers.get("Retry-After"));
+    throw new ApiError(body?.error?.message ?? `Request failed (${response.status})`, body?.error?.code, response.status, Number.isFinite(retryAfter) ? retryAfter : undefined);
   }
   return response.status === 204 ? (undefined as T) : response.json();
 }
@@ -70,5 +77,6 @@ export const api = {
   board: async (wid: string, pid: string) => (await request<Envelope<BoardData>>(`/api/v1/workspaces/${wid}/projects/${pid}/board`)).data,
   createTask: async (wid: string, body: { projectId: string; title: string; description?: string; status?: string; priority?: string; dueDate?: string | null }) => (await request<Envelope<Task>>(`/api/v1/workspaces/${wid}/tasks/`, { method: "POST", body: JSON.stringify(body) })).data,
   moveTask: async (wid: string, taskId: string, status: string, position: number) => (await request<Envelope<Task>>(`/api/v1/workspaces/${wid}/tasks/${taskId}/move`, { method: "PATCH", body: JSON.stringify({ status, position }) })).data,
-  askAi: async (wid: string, intent: string) => (await request<Envelope<AiResult>>(`/api/v1/workspaces/${wid}/ai/ask`, { method: "POST", body: JSON.stringify({ intent }) })).data,
+  aiCapabilities: async (wid: string) => (await request<Envelope<AiCapabilities>>(`/api/v1/workspaces/${wid}/ai/capabilities`)).data,
+  askAi: async (wid: string, body: AiRequest, signal?: AbortSignal) => (await request<Envelope<AiResult>>(`/api/v1/workspaces/${wid}/ai/ask`, { method: "POST", body: JSON.stringify(body), signal })).data,
 };
