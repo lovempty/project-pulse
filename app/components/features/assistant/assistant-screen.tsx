@@ -5,7 +5,7 @@ import { useEffect, useRef } from "react";
 import type { AiEvidence, AiIntent, AiResult } from "../../../lib/api";
 import { useProjectPulse } from "../../../providers/project-pulse-provider";
 import { Icon } from "../../ui/glyph";
-import { useAssistantChat } from "./use-assistant-chat";
+import { useAssistantChat, type ChatMessage } from "./use-assistant-chat";
 
 const prompts: { label: string; description: string; intent: AiIntent }[] = [
   { label: "Summarize progress", description: "Executive view of completed and open work", intent: "SUMMARIZE_PROGRESS" },
@@ -18,6 +18,7 @@ export function AssistantScreen() {
   const { workspace, projects, tasks, members } = useProjectPulse();
   const chat = useAssistantChat(workspace?.id);
   const endRef = useRef<HTMLDivElement>(null);
+  const hasStreamingMessage = chat.messages.some((message) => message.role === "ASSISTANT" && message.delivery === "STREAMING");
 
   useEffect(() => { endRef.current?.scrollIntoView({ behavior: "smooth", block: "end" }); }, [chat.messages, chat.pending, chat.error]);
 
@@ -34,16 +35,16 @@ export function AssistantScreen() {
         <header className="ai-conversation-header"><div><span className="ai-claude-mark"><Icon name="spark" size={18}/></span><div><h1>ProjectPulse Intelligence</h1><p>Grounded in live workspace data</p></div></div><div className="ai-model-status"><i className={chat.capabilities?.mode === "MOCK" ? "mock" : ""}/><span>{chat.capabilities?.model ? readableModel(chat.capabilities.model) : "Claude"}</span>{chat.capabilities?.mode === "MOCK" && <em>Mock mode</em>}</div></header>
 
         <div className="ai-message-scroll">
-          {!chat.messages.length && !chat.pending ? <EmptyChat onIntent={(intent) => void chat.askIntent(intent)}/> : <div className="ai-message-list">{chat.messages.map((message) => message.role === "USER" ? <UserMessage key={message.id} content={message.content} createdAt={message.createdAt}/> : <AssistantMessage key={message.id} result={message.result} tasks={tasks} onFollowUp={(question) => void chat.askQuestion(question)}/>)}</div>}
+          {!chat.messages.length && !chat.pending ? <EmptyChat onIntent={(intent) => void chat.askIntent(intent)}/> : <div className="ai-message-list">{chat.messages.map((message) => message.role === "USER" ? <UserMessage key={message.id} content={message.content} createdAt={message.createdAt}/> : <AssistantMessage key={message.id} message={message} tasks={tasks} onFollowUp={(question) => void chat.askQuestion(question)}/>)}</div>}
 
-          {chat.pending && <div className="ai-thinking"><span className="ai-assistant-avatar"><Icon name="spark" size={17}/></span><div><b>Claude is analyzing your workspace</b><p>Reviewing projects, delivery signals, workload, and recent activity…</p><span className="thinking-dots"><i/><i/><i/></span></div></div>}
+          {chat.pending && !hasStreamingMessage && <div className="ai-thinking"><span className="ai-assistant-avatar"><Icon name="spark" size={17}/></span><div><b>ProjectPulse Intelligence</b><p>{chat.streamStatus?.message ?? "Preparing your response"}</p><span className="thinking-dots"><i/><i/><i/></span></div></div>}
 
-          {chat.error && <div className="ai-chat-error"><span><Icon name="clock" size={17}/></span><div><b>Analysis interrupted</b><p>{chat.error}</p></div>{chat.failedRequest && <button onClick={() => void chat.retry()}>Retry</button>}</div>}
+          {chat.error && <div className="ai-chat-error"><span><Icon name="clock" size={17}/></span><div><b>Response interrupted</b><p>{chat.error}</p></div>{chat.failedRequest && <button onClick={() => void chat.retry()}>Retry</button>}</div>}
           <div ref={endRef}/>
         </div>
 
         <div className="ai-composer-wrap">
-          <div className={`ai-composer ${chat.pending ? "pending" : ""}`}><textarea value={chat.question} onChange={(event) => chat.setQuestion(event.target.value.slice(0, 1000))} onKeyDown={(event) => { if (event.key === "Enter" && !event.shiftKey) { event.preventDefault(); void chat.askQuestion(); } }} placeholder="Ask about priorities, delivery risk, workload, or project progress…" rows={2} disabled={chat.pending}/><footer><span><Icon name="spark" size={14}/> Claude uses authorized workspace context</span><div><small>{chat.question.length}/1000</small>{chat.pending ? <button className="ai-stop" onClick={chat.stop}>Stop</button> : <button className="ai-send" onClick={() => void chat.askQuestion()} disabled={!chat.question.trim()} aria-label="Send question"><Icon name="arrow" size={18}/></button>}</div></footer></div>
+          <div className={`ai-composer ${chat.pending ? "pending" : ""}`}><textarea value={chat.question} onChange={(event) => chat.setQuestion(event.target.value.slice(0, 1000))} onKeyDown={(event) => { if (event.key === "Enter" && !event.shiftKey) { event.preventDefault(); void chat.askQuestion(); } }} placeholder="Ask about priorities, delivery risk, workload, or project progress…" rows={2} disabled={chat.pending}/><footer><span><Icon name="spark" size={14}/> Uses authorized workspace context</span><div><small>{chat.question.length}/1000</small>{chat.pending ? <button className="ai-stop" onClick={chat.stop}>Stop</button> : <button className="ai-send" onClick={() => void chat.askQuestion()} disabled={!chat.question.trim()} aria-label="Send question"><Icon name="arrow" size={18}/></button>}</div></footer></div>
           <p className="ai-disclaimer">AI can make mistakes. Verify important project decisions against source records.</p>
         </div>
       </section>
@@ -59,8 +60,11 @@ function UserMessage({ content, createdAt }: { content: string; createdAt: strin
   return <article className="chat-message user-message"><div className="message-meta"><b>You</b><time>{formatTime(createdAt)}</time></div><div className="user-bubble">{content}</div></article>;
 }
 
-function AssistantMessage({ result, tasks, onFollowUp }: { result: AiResult; tasks: { id: string }[]; onFollowUp: (question: string) => void }) {
-  return <article className="chat-message assistant-message"><div className="assistant-message-rail"><span className="ai-assistant-avatar"><Icon name="spark" size={17}/></span><i/></div><div className="assistant-message-body"><div className="message-meta"><b>ProjectPulse Intelligence</b><span className="claude-chip">Claude</span><time>{formatTime(result.generatedAt)}</time></div><p className="assistant-summary">{result.summary}</p><div className="ai-insight-grid"><InsightSection title="Highlights" tone="positive" icon="trend" items={result.highlights}/><InsightSection title="Risks" tone="risk" icon="clock" items={result.risks}/><InsightSection title="Recommended actions" tone="action" icon="check" items={result.recommendedActions}/></div>{result.evidence.length > 0 && <div className="ai-evidence"><div className="section-heading"><span><Icon name="folder" size={15}/> Evidence from your workspace</span><small>{result.evidence.length} sources</small></div><div className="evidence-list">{result.evidence.map((evidence, index) => <EvidenceItem key={`${evidence.type}-${evidence.id}-${index}`} evidence={evidence} linkedTask={Boolean(evidence.id && tasks.some((task) => task.id === evidence.id))}/>)}</div></div>}{result.followUpQuestions.length > 0 && <div className="ai-follow-ups"><span>Continue exploring</span>{result.followUpQuestions.map((question) => <button key={question} onClick={() => onFollowUp(question)}>{question}<Icon name="arrow" size={14}/></button>)}</div>}<div className="assistant-response-footer"><span><Icon name="check" size={13}/> Grounded response</span><span>{result.metadata.latencyMs.toLocaleString()} ms</span><button onClick={() => void navigator.clipboard.writeText(formatResult(result))}>Copy response</button></div></div></article>;
+function AssistantMessage({ message, tasks, onFollowUp }: { message: Extract<ChatMessage, { role: "ASSISTANT" }>; tasks: { id: string }[]; onFollowUp: (question: string) => void }) {
+  const { result } = message;
+  const hasInsights = result.highlights.length > 0 || result.risks.length > 0 || result.recommendedActions.length > 0;
+  const sourceLabel = result.responseSource === "CLAUDE" ? "Claude" : "ProjectPulse";
+  return <article className={`chat-message assistant-message ${message.delivery.toLowerCase()}`}><div className="assistant-message-rail"><span className="ai-assistant-avatar"><Icon name="spark" size={17}/></span><i/></div><div className="assistant-message-body"><div className="message-meta"><b>ProjectPulse Intelligence</b><span className={`claude-chip ${result.responseSource === "SYSTEM" ? "system" : ""}`}>{sourceLabel}</span><time>{formatTime(result.generatedAt)}</time></div>{result.summary ? <p className="assistant-summary">{result.summary}{message.delivery === "STREAMING" && <span className="stream-caret" aria-hidden/>}</p> : message.delivery === "STREAMING" ? <p className="assistant-stream-status"><span className="thinking-dots"><i/><i/><i/></span>{statusLabel(message.status)}</p> : null}{hasInsights && <div className="ai-insight-grid">{result.highlights.length > 0 && <InsightSection title="Highlights" tone="positive" icon="trend" items={result.highlights}/>} {result.risks.length > 0 && <InsightSection title="Risks" tone="risk" icon="clock" items={result.risks}/>} {result.recommendedActions.length > 0 && <InsightSection title="Recommended actions" tone="action" icon="check" items={result.recommendedActions}/>}</div>}{result.evidence.length > 0 && <div className="ai-evidence"><div className="section-heading"><span><Icon name="folder" size={15}/> Evidence from your workspace</span><small>{result.evidence.length} sources</small></div><div className="evidence-list">{result.evidence.map((evidence, index) => <EvidenceItem key={`${evidence.type}-${evidence.id}-${index}`} evidence={evidence} linkedTask={Boolean(evidence.id && tasks.some((task) => task.id === evidence.id))}/>)}</div></div>}{result.followUpQuestions.length > 0 && <div className="ai-follow-ups"><span>Continue exploring</span>{result.followUpQuestions.map((question) => <button key={question} onClick={() => onFollowUp(question)} disabled={message.delivery !== "COMPLETE"}>{question}<Icon name="arrow" size={14}/></button>)}</div>}{message.delivery === "COMPLETE" && <div className="assistant-response-footer"><span><Icon name="check" size={13}/> {result.responseSource === "CLAUDE" ? "Grounded response" : "ProjectPulse response"}</span>{result.metadata.latencyMs > 0 && <span>{result.metadata.latencyMs.toLocaleString()} ms</span>}<button onClick={() => void navigator.clipboard.writeText(formatResult(result))}>Copy response</button></div>}</div></article>;
 }
 
 function InsightSection({ title, tone, icon, items }: { title: string; tone: string; icon: "trend" | "clock" | "check"; items: string[] }) {
@@ -75,4 +79,18 @@ function EvidenceItem({ evidence, linkedTask }: { evidence: AiEvidence; linkedTa
 
 function readableModel(model: string) { return model.replace("claude-", "Claude ").replaceAll("-", " ").replace(/\b\w/g, (letter) => letter.toUpperCase()); }
 function formatTime(value: string) { return new Intl.DateTimeFormat("en", { hour: "numeric", minute: "2-digit" }).format(new Date(value)); }
-function formatResult(result: AiResult) { return [result.summary, "", "Highlights", ...result.highlights.map((item) => `• ${item}`), "", "Risks", ...result.risks.map((item) => `• ${item}`), "", "Recommended actions", ...result.recommendedActions.map((item) => `• ${item}`)].join("\n"); }
+function statusLabel(status?: Extract<ChatMessage, { role: "ASSISTANT" }>["status"]) {
+  if (status === "GATHERING_CONTEXT") return "Reviewing authorized workspace data";
+  if (status === "ANALYZING") return "Analyzing delivery signals";
+  if (status === "FORMATTING") return "Preparing the final response";
+  return "Understanding your request";
+}
+function formatResult(result: AiResult) {
+  const sections = [
+    result.summary,
+    result.highlights.length ? `Highlights\n${result.highlights.map((item) => `• ${item}`).join("\n")}` : "",
+    result.risks.length ? `Risks\n${result.risks.map((item) => `• ${item}`).join("\n")}` : "",
+    result.recommendedActions.length ? `Recommended actions\n${result.recommendedActions.map((item) => `• ${item}`).join("\n")}` : "",
+  ];
+  return sections.filter(Boolean).join("\n\n");
+}

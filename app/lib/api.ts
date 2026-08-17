@@ -11,12 +11,22 @@ export type AnalyticsData = { tasksByStatus: { name: string; count: number }[]; 
 export type DashboardData = { metrics: { activeProjectCount: number; completedTaskCount: number; overdueTaskCount: number; teamWorkloadPercent: number }; projectCompletionTrend: { projectId: string; name: string; progress: number }[]; activeProjects: Project[]; teamWorkload: Workload[]; recentActivity: Activity[] };
 export type BoardData = { project: Project; columns: { status: string; tasks: Task[] }[] };
 export type AiIntent = "SUMMARIZE_PROGRESS" | "IDENTIFY_RISKS" | "RECOMMEND_PRIORITIES" | "GENERATE_WEEKLY_UPDATE";
+export type AiResponseType = "CONVERSATIONAL" | "ANALYSIS";
+export type AiResponseSource = "SYSTEM" | "CLAUDE";
+export type AiStreamStage = "CLASSIFYING" | "GATHERING_CONTEXT" | "ANALYZING" | "FORMATTING";
 export type AiHistoryMessage = { role: "USER" | "ASSISTANT"; content: string };
 export type AiRequest = { intent?: AiIntent; question?: string | null; projectId?: string | null; history?: AiHistoryMessage[] };
 export type AiEvidence = { type: "TASK" | "PROJECT" | "MEMBER" | "METRIC"; id: string | null; label: string; detail: string };
 export type AiMetadata = { provider: "ANTHROPIC"; model: string; mode: "LIVE" | "MOCK"; latencyMs: number; inputTokens: number; outputTokens: number; cacheReadTokens: number };
-export type AiResult = { summary: string; highlights: string[]; risks: string[]; recommendedActions: string[]; evidence: AiEvidence[]; followUpQuestions: string[]; generatedAt: string; metadata: AiMetadata };
-export type AiCapabilities = { provider: "ANTHROPIC"; model: string; mode: "LIVE" | "MOCK"; supportsCustomQuestions: boolean; supportsProjectFiltering: boolean; supportsFollowUps: boolean; supportsStreaming?: boolean };
+export type AiResult = { responseType: AiResponseType; responseSource: AiResponseSource; summary: string; highlights: string[]; risks: string[]; recommendedActions: string[]; evidence: AiEvidence[]; followUpQuestions: string[]; generatedAt: string; metadata: AiMetadata };
+export type AiCapabilities = { provider: "ANTHROPIC"; model: string; mode: "LIVE" | "MOCK"; supportsCustomQuestions: boolean; supportsProjectFiltering: boolean; supportsFollowUps: boolean; supportsStreaming: boolean; streamProtocol?: "SSE"; streamEndpoint?: string };
+export type AiStreamEvent =
+  | { event: "start"; id?: string; data: { requestId: string; responseType: AiResponseType; responseSource: AiResponseSource; provider: "ANTHROPIC"; model: string; mode: "LIVE" | "MOCK" } }
+  | { event: "status"; id?: string; data: { stage: AiStreamStage; message: string } }
+  | { event: "delta"; id?: string; data: { text: string } }
+  | { event: "result"; id?: string; data: AiResult }
+  | { event: "error"; id?: string; data: { code: string; message: string; retryable: boolean; requestId: string } }
+  | { event: "done"; id?: string; data: { requestId: string } };
 
 type Envelope<T> = { data: T };
 type Page<T> = Envelope<T[]> & { pagination: { page: number; limit: number; total: number; totalPages: number } };
@@ -24,14 +34,18 @@ type Page<T> = Envelope<T[]> & { pagination: { page: number; limit: number; tota
 let accessToken = "";
 
 export class ApiError extends Error {
-  constructor(message: string, public code = "API_ERROR", public status = 0, public retryAfter?: number) { super(message); }
+  constructor(message: string, public code = "API_ERROR", public status = 0, public retryAfter?: number, public retryable = false) { super(message); }
+}
+
+function headersFor(init: RequestInit) {
+  return { ...(init.body instanceof FormData ? {} : { "Content-Type": "application/json" }), ...(accessToken ? { Authorization: `Bearer ${accessToken}` } : {}), ...init.headers };
 }
 
 async function request<T>(path: string, init: RequestInit = {}, retry = true): Promise<T> {
   const response = await fetch(`${API_URL}${path}`, {
     ...init,
     credentials: "include",
-    headers: { ...(init.body instanceof FormData ? {} : { "Content-Type": "application/json" }), ...(accessToken ? { Authorization: `Bearer ${accessToken}` } : {}), ...init.headers },
+    headers: headersFor(init),
   });
   if (response.status === 401 && retry && !path.includes("/auth/")) {
     const refreshed = await refresh();
@@ -43,6 +57,84 @@ async function request<T>(path: string, init: RequestInit = {}, retry = true): P
     throw new ApiError(body?.error?.message ?? `Request failed (${response.status})`, body?.error?.code, response.status, Number.isFinite(retryAfter) ? retryAfter : undefined);
   }
   return response.status === 204 ? (undefined as T) : response.json();
+}
+
+async function openStream(path: string, init: RequestInit, retry = true): Promise<Response> {
+  const response = await fetch(`${API_URL}${path}`, { ...init, credentials: "include", headers: headersFor(init) });
+  if (response.status === 401 && retry && !path.includes("/auth/")) {
+    const refreshed = await refresh();
+    if (refreshed) return openStream(path, init, false);
+  }
+  if (!response.ok) {
+    const body = await response.json().catch(() => null);
+    const retryAfter = Number(response.headers.get("Retry-After"));
+    throw new ApiError(body?.error?.message ?? `Request failed (${response.status})`, body?.error?.code, response.status, Number.isFinite(retryAfter) ? retryAfter : undefined);
+  }
+  if (!response.body) throw new ApiError("Streaming response body is unavailable", "AI_UPSTREAM_ERROR", response.status, undefined, true);
+  return response;
+}
+
+type RawSseEvent = { event: string; id?: string; data: unknown };
+
+function parseSseFrame(frame: string): RawSseEvent | null {
+  let event = "message";
+  let id: string | undefined;
+  const data: string[] = [];
+  let hasFields = false;
+  for (const line of frame.split(/\r?\n/)) {
+    if (!line || line.startsWith(":")) continue;
+    hasFields = true;
+    const separator = line.indexOf(":");
+    const field = separator === -1 ? line : line.slice(0, separator);
+    let value = separator === -1 ? "" : line.slice(separator + 1);
+    if (value.startsWith(" ")) value = value.slice(1);
+    if (field === "event") event = value;
+    else if (field === "id") id = value;
+    else if (field === "data") data.push(value);
+  }
+  if (!hasFields || data.length === 0) return null;
+  const serialized = data.join("\n");
+  try { return { event, id, data: JSON.parse(serialized) }; }
+  catch { throw new ApiError("The assistant returned an invalid stream event", "AI_INVALID_RESPONSE", 0, undefined, true); }
+}
+
+export async function consumeSseStream(stream: ReadableStream<Uint8Array>, onEvent: (event: AiStreamEvent) => void, signal?: AbortSignal) {
+  const reader = stream.getReader();
+  const decoder = new TextDecoder();
+  let buffer = "";
+  let lastNumericId = -1;
+  try {
+    while (true) {
+      if (signal?.aborted) throw new DOMException("The operation was aborted", "AbortError");
+      const { value, done } = await reader.read();
+      buffer += decoder.decode(value, { stream: !done });
+      const frames = buffer.split(/\r?\n\r?\n/);
+      buffer = frames.pop() ?? "";
+      for (const frame of frames) {
+        const parsed = parseSseFrame(frame);
+        if (!parsed) continue;
+        if (parsed.id !== undefined && /^\d+$/.test(parsed.id)) {
+          const numericId = Number(parsed.id);
+          if (numericId <= lastNumericId) continue;
+          lastNumericId = numericId;
+        }
+        const event = parsed as AiStreamEvent;
+        onEvent(event);
+        if (event.event === "error") throw new ApiError(event.data.message, event.data.code, 0, undefined, event.data.retryable);
+        if (event.event === "done") {
+          await reader.cancel();
+          return;
+        }
+      }
+      if (done) break;
+    }
+    if (buffer.trim()) {
+      const parsed = parseSseFrame(buffer);
+      if (parsed) onEvent(parsed as AiStreamEvent);
+    }
+  } finally {
+    reader.releaseLock();
+  }
 }
 
 async function refresh() {
@@ -79,4 +171,8 @@ export const api = {
   moveTask: async (wid: string, taskId: string, status: string, position: number) => (await request<Envelope<Task>>(`/api/v1/workspaces/${wid}/tasks/${taskId}/move`, { method: "PATCH", body: JSON.stringify({ status, position }) })).data,
   aiCapabilities: async (wid: string) => (await request<Envelope<AiCapabilities>>(`/api/v1/workspaces/${wid}/ai/capabilities`)).data,
   askAi: async (wid: string, body: AiRequest, signal?: AbortSignal) => (await request<Envelope<AiResult>>(`/api/v1/workspaces/${wid}/ai/ask`, { method: "POST", body: JSON.stringify(body), signal })).data,
+  streamAi: async (wid: string, body: AiRequest, onEvent: (event: AiStreamEvent) => void, signal?: AbortSignal) => {
+    const response = await openStream(`/api/v1/workspaces/${wid}/ai/stream`, { method: "POST", body: JSON.stringify(body), headers: { Accept: "text/event-stream" }, signal });
+    await consumeSseStream(response.body!, onEvent, signal);
+  },
 };
