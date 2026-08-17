@@ -17,10 +17,14 @@ const prompts: { label: string; description: string; intent: AiIntent }[] = [
 export function AssistantScreen() {
   const { workspace, projects, tasks, members } = useProjectPulse();
   const chat = useAssistantChat(workspace?.id);
-  const endRef = useRef<HTMLDivElement>(null);
+  const messageScrollRef = useRef<HTMLDivElement>(null);
   const hasStreamingMessage = chat.messages.some((message) => message.role === "ASSISTANT" && message.delivery === "STREAMING");
 
-  useEffect(() => { endRef.current?.scrollIntoView({ behavior: "smooth", block: "end" }); }, [chat.messages, chat.pending, chat.error]);
+  useEffect(() => {
+    const messageScroll = messageScrollRef.current;
+    if (!messageScroll) return;
+    messageScroll.scrollTo({ top: messageScroll.scrollHeight, behavior: chat.pending ? "auto" : "smooth" });
+  }, [chat.messages, chat.pending, chat.error]);
 
   return (
     <div className="assistant-chat-page">
@@ -34,13 +38,12 @@ export function AssistantScreen() {
       <section className="ai-conversation">
         <header className="ai-conversation-header"><div><span className="ai-claude-mark"><Icon name="spark" size={18}/></span><div><h1>ProjectPulse Intelligence</h1><p>Grounded in live workspace data</p></div></div><div className="ai-model-status"><i className={chat.capabilities?.mode === "MOCK" ? "mock" : ""}/><span>{chat.capabilities?.model ? readableModel(chat.capabilities.model) : "Claude"}</span>{chat.capabilities?.mode === "MOCK" && <em>Mock mode</em>}</div></header>
 
-        <div className="ai-message-scroll">
+        <div className="ai-message-scroll" ref={messageScrollRef}>
           {!chat.messages.length && !chat.pending ? <EmptyChat onIntent={(intent) => void chat.askIntent(intent)}/> : <div className="ai-message-list">{chat.messages.map((message) => message.role === "USER" ? <UserMessage key={message.id} content={message.content} createdAt={message.createdAt}/> : <AssistantMessage key={message.id} message={message} tasks={tasks} onFollowUp={(question) => void chat.askQuestion(question)}/>)}</div>}
 
           {chat.pending && !hasStreamingMessage && <div className="ai-thinking"><span className="ai-assistant-avatar"><Icon name="spark" size={17}/></span><div><b>ProjectPulse Intelligence</b><p>{chat.streamStatus?.message ?? "Preparing your response"}</p><span className="thinking-dots"><i/><i/><i/></span></div></div>}
 
           {chat.error && <div className="ai-chat-error"><span><Icon name="clock" size={17}/></span><div><b>Response interrupted</b><p>{chat.error}</p></div>{chat.failedRequest && <button onClick={() => void chat.retry()}>Retry</button>}</div>}
-          <div ref={endRef}/>
         </div>
 
         <div className="ai-composer-wrap">
