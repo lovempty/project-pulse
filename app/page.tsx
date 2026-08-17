@@ -1,6 +1,7 @@
 "use client";
 
-import { FormEvent, useMemo, useState } from "react";
+import { FormEvent, useCallback, useEffect, useMemo, useState } from "react";
+import { api, authenticate, type AiResult, type AnalyticsData, type BoardData, type DashboardData, type Member, type Project, type Task, type User, type Workspace, type Workload } from "./lib/api";
 
 type View =
   | "Overview"
@@ -143,42 +144,9 @@ const nav: { label: View; icon: IconName }[] = [
   { label: "AI Assistant", icon: "spark" },
 ];
 
-const projects = [
-  {
-    name: "Mobile App Redesign",
-    code: "MAR",
-    color: "purple",
-    progress: 78,
-    tasks: "24/31",
-    due: "Sep 18",
-    members: ["AK", "JL", "RM"],
-  },
-  {
-    name: "Q3 Marketing Campaign",
-    code: "Q3",
-    color: "orange",
-    progress: 62,
-    tasks: "18/29",
-    due: "Sep 24",
-    members: ["NS", "AK", "DB"],
-  },
-  {
-    name: "API v2.0",
-    code: "API",
-    color: "blue",
-    progress: 45,
-    tasks: "14/32",
-    due: "Oct 02",
-    members: ["JL", "RM", "CH"],
-  },
-];
-
-const initialBoard = {
-  "TO DO": ["Create onboarding empty states", "Finalize pricing copy"],
-  "IN PROGRESS": ["Build analytics dashboard", "Mobile navigation QA"],
-  REVIEW: ["Workspace invite flow"],
-  DONE: ["Design system tokens", "Project overview API"],
-};
+const initials = (name = "") => name.split(" ").map((part) => part[0]).join("").slice(0, 2).toUpperCase();
+const formatDate = (value?: string | null) => value ? new Intl.DateTimeFormat("en", { month: "short", day: "2-digit" }).format(new Date(value)) : "No date";
+const statusLabel = (status: string) => status.replaceAll("_", " ");
 
 function AvatarStack({ people }: { people: string[] }) {
   return (
@@ -198,10 +166,37 @@ export default function Home() {
   const [menuOpen, setMenuOpen] = useState(false);
   const [modal, setModal] = useState(false);
   const [toast, setToast] = useState("");
-  const [board, setBoard] = useState(initialBoard);
-  const [aiAnswer, setAiAnswer] = useState(
-    "Your workspace is moving steadily. Mobile App Redesign leads at 78%, while 3 tasks need attention before Friday.",
-  );
+  const [user, setUser] = useState<User | null>(null);
+  const [workspace, setWorkspace] = useState<Workspace | null>(null);
+  const [dashboard, setDashboard] = useState<DashboardData | null>(null);
+  const [projects, setProjects] = useState<Project[]>([]);
+  const [tasks, setTasks] = useState<Task[]>([]);
+  const [members, setMembers] = useState<Member[]>([]);
+  const [workload, setWorkload] = useState<Workload[]>([]);
+  const [analytics, setAnalytics] = useState<AnalyticsData | null>(null);
+  const [board, setBoard] = useState<BoardData | null>(null);
+  const [loading, setLoading] = useState(true);
+  const [apiError, setApiError] = useState("");
+  const [aiResult, setAiResult] = useState<AiResult | null>(null);
+
+  const loadData = useCallback(async () => {
+    setLoading(true); setApiError("");
+    try {
+      const currentUser = await authenticate();
+      const workspaces = await api.workspaces();
+      const currentWorkspace = workspaces[0];
+      if (!currentWorkspace) throw new Error("No workspace is available for this account.");
+      const projectList = await api.projects(currentWorkspace.id);
+      const [dashboardData, taskList, memberList, workloadData, analyticsData, boardData] = await Promise.all([
+        api.dashboard(currentWorkspace.id), api.tasks(currentWorkspace.id), api.members(currentWorkspace.id), api.workload(currentWorkspace.id), api.analytics(currentWorkspace.id),
+        projectList[0] ? api.board(currentWorkspace.id, projectList[0].id) : Promise.resolve(null),
+      ]);
+      setUser(currentUser); setWorkspace(currentWorkspace); setProjects(projectList); setDashboard(dashboardData); setTasks(taskList); setMembers(memberList); setWorkload(workloadData); setAnalytics(analyticsData); setBoard(boardData);
+    } catch (error) { setApiError(error instanceof Error ? error.message : "Could not connect to ProjectPulse API."); }
+    finally { setLoading(false); }
+  }, []);
+
+  useEffect(() => { const timer = window.setTimeout(() => void loadData(), 0); return () => window.clearTimeout(timer); }, [loadData]);
 
   const greet = useMemo(
     () =>
@@ -220,16 +215,13 @@ export default function Home() {
     setView(item);
     setMenuOpen(false);
   };
-  const moveTask = (
-    task: string,
-    from: keyof typeof board,
-    to: keyof typeof board,
-  ) =>
-    setBoard((prev) => ({
-      ...prev,
-      [from]: prev[from].filter((t) => t !== task),
-      [to]: [...prev[to], task],
-    }));
+  const moveTask = async (task: Task, to: string) => {
+    if (!workspace || !board) return;
+    const previous = board;
+    setBoard({ ...board, columns: board.columns.map((column) => ({ ...column, tasks: column.status === task.status ? column.tasks.filter((item) => item.id !== task.id) : column.status === to ? [...column.tasks, { ...task, status: to }] : column.tasks })) });
+    try { await api.moveTask(workspace.id, task.id, to, board.columns.find((column) => column.status === to)?.tasks.length ?? 0); notify("Task moved successfully"); }
+    catch (error) { setBoard(previous); notify(error instanceof Error ? error.message : "Unable to move task"); }
+  };
 
   return (
     <div className="app-shell">
@@ -255,7 +247,7 @@ export default function Home() {
           <span className="workspace-logo">A</span>
           <span>
             <small>WORKSPACE</small>
-            <strong>Acme Studio</strong>
+            <strong>{workspace?.name ?? "ProjectPulse"}</strong>
           </span>
           <Icon name="chevron" size={14} />
         </div>
@@ -286,10 +278,10 @@ export default function Home() {
             </button>
           </div>
           <div className="user">
-            <span className="avatar profile-avatar">AR</span>
+            <span className="avatar profile-avatar">{initials(user?.name)}</span>
             <span>
-              <strong>Alex Rivera</strong>
-              <small>Product Manager</small>
+              <strong>{user?.name ?? "Loading account"}</strong>
+              <small>{user?.jobTitle ?? "Team member"}</small>
             </span>
             <button>
               <Icon name="more" />
@@ -330,39 +322,40 @@ export default function Home() {
           </button>
         </header>
 
-        {view === "Overview" ? (
+        {loading ? <div className="api-state"><span className="loader"/><h2>Connecting your workspace</h2><p>Loading live projects, tasks, and team activity…</p></div> : apiError ? <div className="api-state error-state"><Icon name="clock" size={28}/><h2>ProjectPulse API is unavailable</h2><p>{apiError}</p><button className="primary" onClick={() => void loadData()}>Try again</button><small>Confirm PostgreSQL is running and the API is ready at localhost:3001.</small></div> : view === "Overview" && dashboard ? (
           <Dashboard
             range={range}
             setRange={setRange}
             greet={greet}
             onView={navigate}
+            dashboard={dashboard}
+            userName={user?.name ?? "there"}
           />
         ) : view === "Board" || view === "My Tasks" ? (
           <Board
             view={view}
             board={board}
+            tasks={tasks}
             moveTask={moveTask}
             onAdd={() => setModal(true)}
           />
         ) : view === "Projects" ? (
-          <Projects onAdd={() => notify("New project flow opened")} />
+          <Projects projects={projects} onAdd={() => notify("New project flow opened")} />
         ) : view === "Team" ? (
-          <Team />
+          <Team members={members} workload={workload} />
         ) : view === "Analytics" ? (
-          <Analytics />
+          <Analytics analytics={analytics} />
         ) : (
-          <Assistant answer={aiAnswer} setAnswer={setAiAnswer} />
+          <Assistant result={aiResult} ask={async (intent) => { if (!workspace) return; try { setAiResult(await api.askAi(workspace.id, intent)); } catch (error) { notify(error instanceof Error ? error.message : "AI request failed"); } }} />
         )}
       </main>
 
       {modal && (
         <TaskModal
           close={() => setModal(false)}
-          save={(title) => {
-            setBoard((p) => ({ ...p, "TO DO": [...p["TO DO"], title] }));
-            setModal(false);
-            notify("Task created in To Do");
-          }}
+          projects={projects}
+          defaultProjectId={board?.project.id ?? projects[0]?.id}
+          save={async (form) => { if (!workspace) return; try { await api.createTask(workspace.id, form); setModal(false); notify("Task created in To Do"); await loadData(); } catch (error) { notify(error instanceof Error ? error.message : "Unable to create task"); } }}
         />
       )}
       {toast && (
@@ -380,38 +373,46 @@ function Dashboard({
   setRange,
   greet,
   onView,
+  dashboard,
+  userName,
 }: {
   range: string;
   setRange: (v: string) => void;
   greet: string;
   onView: (v: View) => void;
+  dashboard: DashboardData;
+  userName: string;
 }) {
+  const { metrics } = dashboard;
+  const [renderedAt] = useState(() => Date.now());
+  const trend = dashboard.projectCompletionTrend.length ? dashboard.projectCompletionTrend : [{ projectId: "empty", name: "No projects", progress: 0 }];
+  const chartPoints = trend.map((item, index) => `${trend.length === 1 ? 310 : Math.round(index * 620 / (trend.length - 1))},${198 - Math.round(item.progress * 1.88)}`).join(" ");
   const stats = [
     {
       label: "Active projects",
-      value: "8",
-      note: "2 due this month",
+      value: String(metrics.activeProjectCount),
+      note: `${dashboard.activeProjects.filter((p) => p.dueDate).length} scheduled projects`,
       icon: "folder" as IconName,
       tone: "indigo",
     },
     {
       label: "Tasks completed",
-      value: "124",
-      note: "12.5% from last week",
+      value: String(metrics.completedTaskCount),
+      note: "Completed across workspace",
       icon: "check" as IconName,
       tone: "green",
     },
     {
       label: "Tasks overdue",
-      value: "7",
-      note: "3 need attention",
+      value: String(metrics.overdueTaskCount),
+      note: metrics.overdueTaskCount ? "Need attention" : "All tasks on track",
       icon: "clock" as IconName,
       tone: "red",
     },
     {
       label: "Team workload",
-      value: "82%",
-      note: "Healthy capacity",
+      value: `${metrics.teamWorkloadPercent}%`,
+      note: metrics.teamWorkloadPercent > 85 ? "Near team capacity" : "Healthy capacity",
       icon: "users" as IconName,
       tone: "orange",
     },
@@ -422,7 +423,7 @@ function Dashboard({
         <div>
           <p>{greet}</p>
           <h1>
-            Good morning, Alex <span>👋</span>
+            Good morning, {userName.split(" ")[0]} <span>👋</span>
           </h1>
           <small>Here’s what’s happening with your projects today.</small>
         </div>
@@ -486,23 +487,11 @@ function Dashboard({
               <g className="gridlines">
                 <path d="M0 10H620M0 57H620M0 104H620M0 151H620M0 198H620" />
               </g>
-              <path
-                className="area"
-                d="M0 166 C50 161 64 140 103 145 S160 116 207 122 S265 80 310 91 S365 72 414 77 S470 48 517 54 S574 23 620 30 L620 200 L0 200Z"
-              />
-              <path
-                className="line"
-                d="M0 166 C50 161 64 140 103 145 S160 116 207 122 S265 80 310 91 S365 72 414 77 S470 48 517 54 S574 23 620 30"
-              />
+              <polygon className="area" points={`0,198 ${chartPoints} 620,198`} />
+              <polyline className="line" points={chartPoints} />
             </svg>
             <div className="chart-x">
-              <span>Mon</span>
-              <span>Tue</span>
-              <span>Wed</span>
-              <span>Thu</span>
-              <span>Fri</span>
-              <span>Sat</span>
-              <span>Sun</span>
+              {trend.map((item) => <span key={item.projectId}>{item.name.split(" ")[0]}</span>)}
             </div>
           </div>
         </div>
@@ -513,24 +502,19 @@ function Dashboard({
             action="View team"
             onClick={() => onView("Team")}
           />
-          {[
-            { n: "Nina S.", r: "Designer", v: 92, c: "#755cf6", a: "NS" },
-            { n: "James L.", r: "Developer", v: 84, c: "#3b82f6", a: "JL" },
-            { n: "Rina M.", r: "Developer", v: 76, c: "#22a778", a: "RM" },
-            { n: "David B.", r: "Marketing", v: 65, c: "#f59e45", a: "DB" },
-          ].map((x) => (
-            <div className="work-row" key={x.n}>
-              <span className="avatar" style={{ background: x.c }}>
-                {x.a}
+          {dashboard.teamWorkload.slice(0, 4).map((x, index) => (
+            <div className="work-row" key={x.user.id}>
+              <span className="avatar" style={{ background: ["#755cf6", "#3b82f6", "#22a778", "#f59e45"][index] }}>
+                {initials(x.user.name)}
               </span>
               <div>
                 <p>
-                  <strong>{x.n}</strong>
-                  <small>{x.r}</small>
-                  <b>{x.v}%</b>
+                  <strong>{x.user.name}</strong>
+                  <small>{x.openTasks} open</small>
+                  <b>{x.workloadPercent}%</b>
                 </p>
                 <div className="meter">
-                  <i style={{ width: `${x.v}%`, background: x.c }} />
+                  <i style={{ width: `${x.workloadPercent}%`, background: ["#755cf6", "#3b82f6", "#22a778", "#f59e45"][index] }} />
                 </div>
               </div>
             </div>
@@ -546,19 +530,19 @@ function Dashboard({
             onClick={() => onView("Projects")}
           />
           <div className="project-list">
-            {projects.map((p) => (
-              <div className="project-row" key={p.name}>
-                <span className={`project-logo ${p.color}`}>{p.code}</span>
+            {dashboard.activeProjects.slice(0, 4).map((p, index) => (
+              <div className="project-row" key={p.id}>
+                <span className={`project-logo ${["purple", "orange", "blue", "green"][index % 4]}`}>{p.key}</span>
                 <div className="project-name">
                   <strong>{p.name}</strong>
                   <small>
-                    <Icon name="calendar" size={13} /> Due {p.due}
+                    <Icon name="calendar" size={13} /> Due {formatDate(p.dueDate)}
                   </small>
                 </div>
-                <AvatarStack people={p.members} />
+                <AvatarStack people={dashboard.teamWorkload.slice(0, 3).map((w) => initials(w.user.name))} />
                 <div className="task-count">
                   <small>Tasks</small>
-                  <b>{p.tasks}</b>
+                  <b>{p.completedTasks ?? 0}/{p.totalTasks ?? p.taskCount ?? 0}</b>
                 </div>
                 <div className="project-progress">
                   <span>
@@ -582,53 +566,12 @@ function Dashboard({
             action="View all"
             onClick={() => onView("My Tasks")}
           />
-          {[
-            {
-              a: "NS",
-              c: "purple",
-              text: (
-                <>
-                  <b>Nina</b> completed <strong>Homepage wireframes</strong>
-                </>
-              ),
-              t: "12 min ago",
-            },
-            {
-              a: "JL",
-              c: "blue",
-              text: (
-                <>
-                  <b>James</b> commented on <strong>API authentication</strong>
-                </>
-              ),
-              t: "34 min ago",
-            },
-            {
-              a: "RM",
-              c: "green",
-              text: (
-                <>
-                  <b>Rina</b> moved <strong>Checkout flow</strong> to Review
-                </>
-              ),
-              t: "1 hr ago",
-            },
-            {
-              a: "DB",
-              c: "orange",
-              text: (
-                <>
-                  <b>David</b> created <strong>Campaign assets</strong>
-                </>
-              ),
-              t: "2 hrs ago",
-            },
-          ].map((x, i) => (
-            <div className="activity-row" key={i}>
-              <span className={`avatar ${x.c}`}>{x.a}</span>
+          {dashboard.recentActivity.slice(0, 4).map((x, i) => (
+            <div className="activity-row" key={x.id}>
+              <span className={`avatar ${["purple", "blue", "green", "orange"][i]}`}>{initials(x.actor.name)}</span>
               <div>
-                <p>{x.text}</p>
-                <small>{x.t}</small>
+                <p><b>{x.actor.name}</b> {statusLabel(x.action).toLowerCase()} {x.task && <strong>{x.task.title}</strong>}</p>
+                <small>{new Intl.RelativeTimeFormat("en", { numeric: "auto" }).format(Math.max(-30, Math.round((new Date(x.createdAt).getTime() - renderedAt) / 86400000)), "day")}</small>
               </div>
             </div>
           ))}
@@ -666,21 +609,23 @@ function CardTitle({
 function Board({
   view,
   board,
+  tasks,
   moveTask,
   onAdd,
 }: {
   view: View;
-  board: typeof initialBoard;
-  moveTask: (t: string, f: keyof typeof board, to: keyof typeof board) => void;
+  board: BoardData | null;
+  tasks: Task[];
+  moveTask: (task: Task, to: string) => void;
   onAdd: () => void;
 }) {
-  const cols = Object.keys(board) as (keyof typeof board)[];
+  const cols = view === "My Tasks" ? ["BACKLOG", "TODO", "IN_PROGRESS", "REVIEW", "DONE"].map((status) => ({ status, tasks: tasks.filter((task) => task.status === status) })) : board?.columns ?? [];
   return (
     <div className="content inner-page">
       <div className="page-heading">
         <div>
-          <p>Workspace / Product</p>
-          <h1>{view === "My Tasks" ? "My tasks" : "Product launch board"}</h1>
+          <p>Workspace / {board?.project.key ?? "Project"}</p>
+          <h1>{view === "My Tasks" ? "My tasks" : `${board?.project.name ?? "Project"} board`}</h1>
           <span>Keep work moving from idea to shipped.</span>
         </div>
         <button className="primary" onClick={onAdd}>
@@ -689,34 +634,32 @@ function Board({
       </div>
       <div className="kanban">
         {cols.map((col, ci) => (
-          <section key={col}>
+          <section key={col.status}>
             <header>
               <span className={`dot d${ci}`} />
-              <b>{col}</b>
-              <em>{board[col].length}</em>
+              <b>{statusLabel(col.status)}</b>
+              <em>{col.tasks.length}</em>
               <button>
                 <Icon name="more" />
               </button>
             </header>
-            {board[col].map((task, i) => (
-              <article key={task}>
+            {col.tasks.map((task, i) => (
+              <article key={task.id}>
                 <span className={i % 2 ? "tag blue-tag" : "tag purple-tag"}>
-                  {i % 2 ? "PRODUCT" : "DESIGN"}
+                  {task.labels?.[0]?.label.name ?? task.priority}
                 </span>
-                <h3>{task}</h3>
-                <p>
-                  Make the experience clear, consistent, and ready for release.
-                </p>
+                <h3>{task.title}</h3>
+                <p>{task.description || "No description added yet."}</p>
                 <div>
-                  <span className="avatar">{["NS", "JL", "RM"][i % 3]}</span>
+                  <span className="avatar">{initials(task.assignee?.name ?? "Unassigned")}</span>
                   <small>
-                    <Icon name="calendar" size={13} /> Sep {16 + i}
+                    <Icon name="calendar" size={13} /> {formatDate(task.dueDate)}
                   </small>
                 </div>
                 {ci < cols.length - 1 && (
                   <button
                     className="move"
-                    onClick={() => moveTask(task, col, cols[ci + 1])}
+                    onClick={() => moveTask(task, cols[ci + 1].status)}
                   >
                     Move forward <Icon name="arrow" size={13} />
                   </button>
@@ -733,7 +676,7 @@ function Board({
   );
 }
 
-function Projects({ onAdd }: { onAdd: () => void }) {
+function Projects({ projects, onAdd }: { projects: Project[]; onAdd: () => void }) {
   return (
     <div className="content inner-page">
       <div className="page-heading">
@@ -747,42 +690,31 @@ function Projects({ onAdd }: { onAdd: () => void }) {
         </button>
       </div>
       <div className="project-gallery">
-        {[
-          ...projects,
-          {
-            name: "Customer Portal",
-            code: "CP",
-            color: "green",
-            progress: 31,
-            tasks: "9/28",
-            due: "Oct 12",
-            members: ["NS", "DB"],
-          },
-        ].map((p) => (
-          <article className="card" key={p.name}>
+        {projects.map((p, index) => (
+          <article className="card" key={p.id}>
             <div>
-              <span className={`project-logo ${p.color}`}>{p.code}</span>
+              <span className={`project-logo ${["purple", "orange", "blue", "green"][index % 4]}`}>{p.key}</span>
               <button>
                 <Icon name="more" />
               </button>
             </div>
             <h2>{p.name}</h2>
-            <p>Cross-functional project for the Acme Studio workspace.</p>
+            <p>{p.description || "Cross-functional project for this workspace."}</p>
             <div className="gallery-meta">
               <span>
                 <Icon name="check" size={15} />
-                {p.tasks} tasks
+                {p.taskCount ?? 0} tasks
               </span>
               <span>
                 <Icon name="calendar" size={15} />
-                {p.due}
+                {formatDate(p.dueDate)}
               </span>
             </div>
             <div className="gallery-progress">
               <span>
                 <b>{p.progress}%</b> complete
               </span>
-              <AvatarStack people={p.members} />
+              <span className="project-status">{statusLabel(p.status)}</span>
             </div>
             <div className="meter">
               <i style={{ width: `${p.progress}%` }} />
@@ -794,15 +726,7 @@ function Projects({ onAdd }: { onAdd: () => void }) {
   );
 }
 
-function Team() {
-  const people = [
-    "Nina Singh",
-    "James Lee",
-    "Rina Matsuda",
-    "David Brooks",
-    "Chloe Hart",
-    "Alex Rivera",
-  ];
+function Team({ members, workload }: { members: Member[]; workload: Workload[] }) {
   return (
     <div className="content inner-page">
       <div className="page-heading">
@@ -816,42 +740,37 @@ function Team() {
         </button>
       </div>
       <div className="team-grid">
-        {people.map((n, i) => (
-          <article className="card" key={n}>
+        {members.map((member, i) => {
+          const load = workload.find((item) => item.user.id === member.user.id);
+          return <article className="card" key={member.id}>
             <span className={`avatar big c${i}`}>
-              {n
-                .split(" ")
-                .map((x) => x[0])
-                .join("")}
+              {initials(member.user.name)}
             </span>
-            <h3>{n}</h3>
-            <p>
-              {i % 3 === 0
-                ? "Product Manager"
-                : i % 3 === 1
-                  ? "Product Designer"
-                  : "Software Engineer"}
-            </p>
+            <h3>{member.user.name}</h3>
+            <p>{member.user.jobTitle || statusLabel(member.role)}</p>
             <div className="capacity">
               <span>
-                <b>{[18, 16, 14, 13, 11, 9][i]}</b> assigned
+                <b>{load?.openTasks ?? 0}</b> assigned
               </span>
               <span>
-                <b>{[4, 6, 3, 5, 2, 4][i]}</b> completed
+                <b>{member.role}</b> role
               </span>
             </div>
             <div className="meter">
-              <i style={{ width: `${[86, 78, 69, 64, 55, 48][i]}%` }} />
+              <i style={{ width: `${load?.workloadPercent ?? 0}%` }} />
             </div>
-            <small>{[86, 78, 69, 64, 55, 48][i]}% capacity</small>
-          </article>
-        ))}
+            <small>{load?.workloadPercent ?? 0}% capacity</small>
+          </article>;
+        })}
       </div>
     </div>
   );
 }
 
-function Analytics() {
+function Analytics({ analytics }: { analytics: AnalyticsData | null }) {
+  const statusData = analytics?.tasksByStatus ?? [];
+  const total = statusData.reduce((sum, item) => sum + item.count, 0);
+  const trend = (analytics?.completionTrend ?? []).slice(-12);
   return (
     <div className="content inner-page">
       <div className="page-heading">
@@ -874,9 +793,9 @@ function Analytics() {
             onClick={() => {}}
           />
           <div className="bars">
-            {[42, 58, 49, 72, 66, 84, 91, 76, 88, 96, 82, 100].map((h, i) => (
-              <i key={i} style={{ height: `${h}%` }}>
-                <span>{14 + i}</span>
+            {(trend.length ? trend : [{date:new Date().toISOString(),count:0}]).map((item, i) => (
+              <i key={`${item.date}-${i}`} style={{ height: `${Math.max(8, Math.min(100, item.count * 25))}%` }}>
+                <span>{new Date(item.date).getDate()}</span>
               </i>
             ))}
           </div>
@@ -885,20 +804,15 @@ function Analytics() {
           <h2>Tasks by status</h2>
           <div className="donut">
             <span>
-              <b>124</b>
+              <b>{total}</b>
               <small>Total tasks</small>
             </span>
           </div>
-          {[
-            ["Completed", 48, "#625bf6"],
-            ["In progress", 27, "#3985ed"],
-            ["To do", 18, "#f2a94a"],
-            ["Overdue", 7, "#ee6872"],
-          ].map((x) => (
-            <p key={x[0]}>
-              <i style={{ background: x[2] as string }} />
-              {x[0]}
-              <b>{x[1]}%</b>
+          {statusData.map((item, index) => (
+            <p key={item.name}>
+              <i style={{ background: ["#625bf6", "#3985ed", "#f2a94a", "#ee6872", "#22a778"][index % 5] }} />
+              {statusLabel(item.name)}
+              <b>{total ? Math.round(item.count / total * 100) : 0}%</b>
             </p>
           ))}
         </div>
@@ -907,13 +821,8 @@ function Analytics() {
   );
 }
 
-function Assistant({
-  answer,
-  setAnswer,
-}: {
-  answer: string;
-  setAnswer: (s: string) => void;
-}) {
+function Assistant({ result, ask: askApi }: { result: AiResult | null; ask: (intent: string) => Promise<void> }) {
+  const setAnswer = (text: string) => void askApi(text.startsWith("Three") ? "IDENTIFY_RISKS" : text.startsWith("Prioritize") ? "RECOMMEND_PRIORITIES" : text.startsWith("This week") ? "GENERATE_WEEKLY_UPDATE" : "SUMMARIZE_PROGRESS");
   const prompts = [
     "Summarize this week's progress",
     "Which tasks are at risk?",
@@ -955,7 +864,7 @@ function Assistant({
         ))}
       </div>
       <div className="ai-response">
-        <div>
+        <div className="ai-response-header">
           <span className="brand-mark">
             <i />
             <i />
@@ -964,7 +873,8 @@ function Assistant({
           <b>Pulse insight</b>
           <small>Based on live workspace data</small>
         </div>
-        <p>{answer}</p>
+        <p>{result?.summary ?? "Choose a question above to analyze your live workspace data."}</p>
+        {result && <div className="ai-details"><span><b>Highlights</b>{result.highlights.join(" · ")}</span><span><b>Risks</b>{result.risks.join(" · ")}</span><span><b>Next actions</b>{result.recommendedActions.join(" · ")}</span></div>}
         <footer>
           <button>Copy</button>
           <button>Regenerate</button>
@@ -977,14 +887,22 @@ function Assistant({
 function TaskModal({
   close,
   save,
+  projects,
+  defaultProjectId,
 }: {
   close: () => void;
-  save: (s: string) => void;
+  save: (form: { projectId: string; title: string; description?: string; status: string; priority: string }) => Promise<void>;
+  projects: Project[];
+  defaultProjectId?: string;
 }) {
   const [title, setTitle] = useState("");
+  const [projectId, setProjectId] = useState(defaultProjectId ?? "");
+  const [status, setStatus] = useState("TODO");
+  const [priority, setPriority] = useState("MEDIUM");
+  const [description, setDescription] = useState("");
   const submit = (e: FormEvent) => {
     e.preventDefault();
-    if (title.trim()) save(title.trim());
+    if (title.trim() && projectId) void save({ projectId, title: title.trim(), description: description.trim() || undefined, status, priority });
   };
   return (
     <div className="modal-backdrop" onMouseDown={close}>
@@ -1011,32 +929,30 @@ function TaskModal({
             placeholder="e.g. Review mobile onboarding"
           />
         </label>
+        <label>Project<select value={projectId} onChange={(e) => setProjectId(e.target.value)}>{projects.map((project) => <option key={project.id} value={project.id}>{project.name}</option>)}</select></label>
         <div className="form-row">
           <label>
             Status
-            <select>
-              <option>To Do</option>
-              <option>In Progress</option>
+            <select value={status} onChange={(e) => setStatus(e.target.value)}>
+              <option value="BACKLOG">Backlog</option><option value="TODO">To Do</option><option value="IN_PROGRESS">In Progress</option><option value="REVIEW">Review</option>
             </select>
           </label>
           <label>
             Priority
-            <select>
-              <option>Medium</option>
-              <option>High</option>
-              <option>Low</option>
+            <select value={priority} onChange={(e) => setPriority(e.target.value)}>
+              <option value="MEDIUM">Medium</option><option value="HIGH">High</option><option value="URGENT">Urgent</option><option value="LOW">Low</option>
             </select>
           </label>
         </div>
         <label>
           Description
-          <textarea placeholder="Add context or acceptance criteria..." />
+          <textarea value={description} onChange={(e) => setDescription(e.target.value)} placeholder="Add context or acceptance criteria..." />
         </label>
         <footer>
           <button type="button" className="secondary" onClick={close}>
             Cancel
           </button>
-          <button className="primary" disabled={!title.trim()}>
+          <button className="primary" disabled={!title.trim() || !projectId}>
             Create task
           </button>
         </footer>
